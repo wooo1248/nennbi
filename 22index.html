@@ -1,0 +1,262 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>燃費管理</title>
+    <style>
+        body { font-family: sans-serif; max-width: 600px; margin: 20px auto; padding: 10px; background-color: #f5f5f5; }
+        .card { background: white; padding: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); margin-bottom: 20px; }
+        h1, h2 { color: #333; margin-top: 0; }
+        .form-group { margin-bottom: 15px; }
+        label { display: block; margin-bottom: 5px; font-weight: bold; }
+        input, select { width: 100%; padding: 8px; box-sizing: border-box; border: 1px solid #ccc; border-radius: 4px; }
+        button { background: #007bff; color: white; border: none; padding: 10px 15px; border-radius: 4px; cursor: pointer; width: 100%; font-size: 16px; }
+        button:hover { background: #0056b3; }
+        .stats { display: flex; justify-content: space-between; background: #e9ecef; padding: 15px; border-radius: 4px; font-weight: bold; margin-bottom: 15px; }
+        .info-text { font-size: 13px; color: #666; margin-top: 5px; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .delete-btn { background: #dc3545; color: white; padding: 3px 8px; border-radius: 3px; font-size: 12px; cursor: pointer; width: auto; }
+        
+        /* グラフ表示エリアのスタイル設定 */
+        .chart-container { position: relative; width: 100%; margin-bottom: 25px; min-height: 200px; }
+        .chart-message { text-align: center; color: #666; font-style: italic; padding: 30px 10px; background: #fafafa; border: 1px dashed #ccc; border-radius: 4px; }
+    </style>
+    <link rel="manifest" href="manifest.json">
+    <link rel="apple-touch-icon" href="icon-192.png">
+    <meta name="theme-color" content="#007bff">
+    
+    <!-- CDNからChart.jsを読み込み -->
+    <script src="https://jsdelivr.net"></script>
+
+    <script>
+    if ('serviceWorker' in navigator) {
+        window.addEventListener('load', () => {
+            navigator.serviceWorker.register('sw.js')
+                .then(reg => console.log('PWA ServiceWorker 登録成功', reg))
+                .catch(err => console.log('PWA ServiceWorker 登録失敗', err));
+        });
+    }
+    </script>
+</head>
+<body>
+
+    <h1>🚗 マイカー燃費管理 (総走行距離入力)</h1>
+
+    <div class="card">
+        <h2>給油データの登録</h2>
+        <div class="form-group">
+            <label for="carName">車種名・クルマの名前</label>
+            <input type="text" id="carName" placeholder="例：プリウス、ファミリーカー" required oninput="showLastOdo()">
+        </div>
+        <div class="form-group">
+            <label for="date">給油日</label>
+            <input type="date" id="date" required>
+        </div>
+        <div class="form-group">
+            <label for="odo">現在の総走行距離メーター (km)</label>
+            <input type="number" id="odo" step="0.1" placeholder="車のメーターの数値をそのまま入力" required>
+            <div id="lastOdoInfo" class="info-text">※車名を入力すると、前回の数値がここに表示されます。</div>
+        </div>
+        <div class="form-group">
+            <label for="fuel">給油量 (L)</label>
+            <input type="number" id="fuel" step="0.01" placeholder="給油した量" required>
+        </div>
+        <button onclick="addRecord()">データを登録する</button>
+    </div>
+
+    <div class="card">
+        <h2>データ確認・平均燃費</h2>
+        <div class="form-group">
+            <label for="filterCar">表示する車を選択:</label>
+            <select id="filterCar" onchange="displayData()">
+                <option value="all">すべての車</option>
+            </select>
+        </div>
+        
+        <div class="stats">
+            <span>選択中の車: <span id="statsCarName">すべて</span></span>
+            <span>平均燃費: <span id="avgFuelEfficiency">0.00</span> km/L</span>
+        </div>
+
+        <!-- 追加：グラフを描画するキャンバス領域 -->
+        <h2>燃費推移グラフ</h2>
+        <div class="chart-container">
+            <canvas id="efficiencyChart" style="display: none;"></canvas>
+            <div id="chartMessage" class="chart-message">車を選択すると燃費の推移グラフが表示されます。</div>
+        </div>
+
+        <h2>給油履歴リスト</h2>
+        <div style="overflow-x: auto;">
+            <table>
+                <thead>
+                    <tr>
+                        <th>車名</th>
+                        <th>日付</th>
+                        <th>総走行距離(km)</th>
+                        <th>今回走行(km)</th>
+                        <th>給油量(L)</th>
+                        <th>燃費(km/L)</th>
+                        <th>操作</th>
+                    </tr>
+                </thead>
+                <tbody id="historyTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let records = JSON.parse(localStorage.getItem('fuelRecordsOdo')) || [];
+        let myChart = null; // Chart.jsのインスタンスを保持する変数
+
+        window.onload = function() {
+            document.getElementById('date').value = new Date().toISOString().split('T')[0];
+            updateCarDropdown();
+            displayData();
+        };
+
+        function showLastOdo() {
+            const carName = document.getElementById('carName').value.trim();
+            const infoDiv = document.getElementById('lastOdoInfo');
+            
+            if (!carName) {
+                infoDiv.textContent = "※車名を入力すると、前回の数値がここに表示されます。";
+                return;
+            }
+
+            const carRecords = records.filter(r => r.carName === carName).sort((a, b) => new Date(a.date) - new Date(b.date));
+            
+            if (carRecords.length > 0) {
+                const lastOdo = carRecords[carRecords.length - 1].odo;
+                infoDiv.textContent = `前回の総走行距離: ${lastOdo} km (これより大きい数値を入力してください)`;
+            } else {
+                infoDiv.textContent = "この車は最初の登録です（今回は燃費計算されず、次回から計算されます）。";
+            }
+        }
+
+        function recalculateAllRecords() {
+            const carNames = [...new Set(records.map(r => r.carName))];
+            let updatedRecords = [];
+
+            carNames.forEach(carName => {
+                const carRecords = records
+                    .filter(r => r.carName === carName)
+                    .sort((a, b) => new Date(a.date) - new Date(b.date));
+
+                carRecords.forEach((record, index) => {
+                    if (index === 0) {
+                        record.tripDistance = 0;
+                        record.efficiency = 0;
+                    } else {
+                        const prevRecord = carRecords[index - 1];
+                        record.tripDistance = parseFloat((record.odo - prevRecord.odo).toFixed(1));
+                        record.efficiency = record.tripDistance > 0 && record.fuel > 0 
+                            ? parseFloat((record.tripDistance / record.fuel).toFixed(2)) 
+                            : 0;
+                    }
+                    updatedRecords.push(record);
+                });
+            });
+
+            records = updatedRecords;
+            localStorage.setItem('fuelRecordsOdo', JSON.stringify(records));
+        }
+
+        function addRecord() {
+            const carName = document.getElementById('carName').value.trim();
+            const date = document.getElementById('date').value;
+            const odo = parseFloat(document.getElementById('odo').value);
+            const fuel = parseFloat(document.getElementById('fuel').value);
+
+            if (!carName || !date || isNaN(odo) || isNaN(fuel) || fuel <= 0) {
+                alert('すべての項目を正しく入力してください。');
+                return;
+            }
+
+            const conflictRecord = records.find(r => r.carName === carName && r.date === date);
+            if (conflictRecord) {
+                alert('同じ日付のデータが既に存在します。日付を変更するか、既存のデータを削除してください。');
+                return;
+            }
+
+            const newRecord = {
+                id: Date.now(),
+                carName: carName,
+                date: date,
+                odo: odo,
+                tripDistance: 0,
+                fuel: fuel,
+                efficiency: 0
+            };
+
+            records.push(newRecord);
+            recalculateAllRecords();
+
+            document.getElementById('odo').value = '';
+            document.getElementById('fuel').value = '';
+            document.getElementById('carName').value = '';
+            document.getElementById('lastOdoInfo').textContent = "※車名を入力すると、前回の数値がここに表示されます。";
+
+            alert('データを登録しました！');
+
+            updateCarDropdown();
+            displayData();
+        }
+
+        function updateCarDropdown() {
+            const filterCar = document.getElementById('filterCar');
+            const currentSelection = filterCar.value;
+            const carNames = [...new Set(records.map(r => r.carName))];
+            
+            filterCar.innerHTML = '<option value="all">すべての車</option>';
+            carNames.forEach(name => {
+                const option = document.createElement('option');
+                option.value = name;
+                option.textContent = name;
+                filterCar.appendChild(option);
+            });
+
+            filterCar.value = currentSelection;
+            if(filterCar.selectedIndex === -1) filterCar.value = 'all';
+        }
+
+        function displayData() {
+            const selectedCar = document.getElementById('filterCar').value;
+            const tableBody = document.getElementById('historyTableBody');
+            tableBody.innerHTML = '';
+
+            const filteredRecords = selectedCar === 'all' 
+                ? records 
+                : records.filter(r => r.carName === selectedCar);
+
+            filteredRecords.sort((a, b) => new Date(b.date) - new Date(a.date));
+
+            let totalDistance = 0;
+            let totalFuel = 0;
+
+            filteredRecords.forEach(r => {
+                if (r.tripDistance > 0) {
+                    totalDistance += r.tripDistance;
+                    totalFuel += r.fuel;
+                }
+
+                const displayTrip = r.tripDistance > 0 ? `${r.tripDistance} km` : '--- (初回)';
+plugins: {
+legend: {
+display: false // タイトルと被るため凡例は非表示
+}
+}
+}
+});
+}
+function deleteRecord(id) {
+if (confirm('この記録を削除してもよろしいですか？\n※削除すると、前後のデータから走行距離や燃費が自動で再計算されます。')) {
+records = records.filter(r => r.id !== id);
+recalculateAllRecords();
+updateCarDropdown();
+displayData();
+showLastOdo();
+}
+}
